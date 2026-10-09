@@ -1,11 +1,13 @@
+cat > ~/viii-shell/install.sh << 'INSTALL_EOF'
 #!/usr/bin/env bash
+# File: ~/viii-shell/install.sh
 # Run with: bash install.sh   (keep it next to quickshell-export.tar.gz)
 set -Eeuo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ARCHIVE="$HERE/quickshell-export.tar.gz"
 BACKUP="$HOME/quickshell-backup-$(date +%Y%m%d-%H%M%S)"
-RC="$HOME/.config/labwc/rc.xml"
+OLDHOME="/home/viii_fn"   # home dir the archive was made on
 
 say()  { printf '\n\033[1;32m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m!! %s\033[0m\n' "$*" >&2; }
@@ -21,71 +23,55 @@ tar tzf "$ARCHIVE" > /dev/null || die "The archive is corrupt"
 say "Backing up existing files to $BACKUP"
 mkdir -p "$BACKUP"
 cd "$HOME"
-for t in .config/quickshell .config/labwc/themerc-override .config/labwc/autostart \
-         .config/labwc/rc.xml .local/bin/screentime-report \
-         .local/share/themes/Vent .themes/Vent; do
+for t in .config/quickshell .config/wofi \
+         .config/labwc/rc.xml .config/labwc/environment \
+         .config/labwc/autostart .config/labwc/themerc-override \
+         .config/viii-shell \
+         .local/bin/screentime-report .local/bin/clean.sh .local/bin/screenshot \
+         .local/share/themes/Vent .themes/Vent \
+         .local/state/quickshell-clock; do
     if [ -e "$t" ]; then cp -a --parents "$t" "$BACKUP"; fi
 done
 
 # ---------- 3. Unpack into the right folders ----------
 say "Unpacking"
 tar xzf "$ARCHIVE" -C "$HOME"
-if [ -f "$HOME/.local/bin/screentime-report" ]; then chmod +x "$HOME/.local/bin/screentime-report"; fi
+chmod +x "$HOME/.local/bin/"{screentime-report,clean.sh,screenshot} 2>/dev/null || true
 
-# ---------- 4. Quickshell keybinds in rc.xml (only adds missing ones) ----------
-say "Adding Quickshell keybinds to rc.xml"
-mkdir -p "$(dirname "$RC")"
-if [ ! -f "$RC" ]; then
-    warn "No rc.xml found, creating a minimal one"
-    cat > "$RC" << 'XML'
-<?xml version="1.0" encoding="UTF-8"?>
-<labwc_config>
-  <keyboard>
-    <default />
-  </keyboard>
-</labwc_config>
-XML
+# Screen-time history is NOT in the archive: this laptop starts its own
+mkdir -p "$HOME/.local/share/screentime"
+
+# ---------- 4. Fix hardcoded home paths (only if the username differs) ----------
+if [ "$HOME" != "$OLDHOME" ]; then
+    say "Rewriting $OLDHOME to $HOME in the config files"
+    grep -rlI --exclude-dir=.git "$OLDHOME" \
+        "$HOME/.config/quickshell" "$HOME/.config/labwc" \
+        "$HOME/.config/wofi" "$HOME/.config/viii-shell" "$HOME/.local/bin" 2>/dev/null \
+        | xargs -r sed -i "s#$OLDHOME#$HOME#g"
 fi
 
-BINDS=(
-    "W-m|qs ipc call music toggle"
-    "W-i|qs ipc call wifi toggle"
-    "W-o|qs ipc call audio toggle"
-    "W-j|qs ipc call dpi toggle"
-    "W-u|qs ipc call screentime toggle"
-    "W-c|qs ipc call clock toggle"
-)
-
-BLOCK=""
-for entry in "${BINDS[@]}"; do
-    key="${entry%%|*}"
-    cmd="${entry#*|}"
-    if grep -qF "command=\"$cmd\"" "$RC"; then
-        continue
-    elif grep -qF "key=\"$key\"" "$RC"; then
-        warn "$key is already bound to something else, skipped: $cmd"
-    else
-        BLOCK+="    <keybind key=\"$key\">"$'\n'
-        BLOCK+="      <action name=\"Execute\" command=\"$cmd\" />"$'\n'
-        BLOCK+="    </keybind>"$'\n'
-    fi
-done
-
-if [ -n "$BLOCK" ]; then
-    grep -q '</keyboard>' "$RC" || die "rc.xml has no </keyboard> section, add the keybinds by hand"
-    BLK="$BLOCK" awk '/<\/keyboard>/ && !d { printf "%s", ENVIRON["BLK"]; d=1 } { print }' "$RC" > "$RC.new"
-    mv "$RC.new" "$RC"
+# ---------- 5. Hook the zsh helpers (srec, srecm, aliases) into ~/.zshrc ----------
+say "Adding srec/srecm and aliases to ~/.zshrc"
+touch "$HOME/.zshrc"
+SRC_LINE='source ~/.config/viii-shell/custom.zsh'
+if ! grep -qxF "$SRC_LINE" "$HOME/.zshrc"; then
+    printf '\n# viii-shell helpers (srec, srecm, aliases)\n%s\n' "$SRC_LINE" >> "$HOME/.zshrc"
 fi
 
-# ---------- 5. Reload labwc if it is running ----------
+# ---------- 6. Reload labwc if it is running ----------
 if pgrep -x labwc > /dev/null; then
     labwc -r || warn "Could not reload labwc, log out and back in instead"
 fi
 
-# ---------- 6. Installs, last ----------
+# ---------- 7. Installs, last ----------
 say "Installing packages"
 sudo pacman -S --needed --noconfirm \
-    curl networkmanager libpulse wlr-randr pipewire pipewire-pulse wireplumber papirus-icon-theme \
+    curl networkmanager libpulse wlr-randr \
+    pipewire pipewire-pulse pipewire-audio wireplumber \
+    papirus-icon-theme wofi zenity micro \
+    playerctl brightnessctl python ffmpeg \
+    wf-recorder slurp grim wl-clipboard \
+    qt6-base qt6-declarative qt6-multimedia qt6-multimedia-ffmpeg qt6-svg qt6-wayland \
     || warn "Some packages failed. Try: sudo pacman -Syu, then run this script again"
 
 if ! command -v qs > /dev/null 2>&1; then
@@ -112,4 +98,5 @@ systemctl --user enable --now pipewire pipewire-pulse wireplumber || warn "Could
 
 say "Done"
 if [ -d "$BACKUP" ] && [ -n "$(ls -A "$BACKUP")" ]; then echo "Replaced files were backed up to: $BACKUP"; else rmdir "$BACKUP" 2>/dev/null || true; fi
-echo "Log out and back in so labwc starts Quickshell from autostart."
+echo "Open a new terminal (for srec/srecm), then log out and back in so labwc starts Quickshell from autostart."
+INSTALL_EOF
